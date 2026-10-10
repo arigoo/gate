@@ -21,7 +21,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -502,14 +502,28 @@ def main():
     log("CLOUDFLARE WORKER", f"耗时: {elapsed:.1f}s")
 
     if worker_errors:
-        # 诊断输出: 只报数字等于没报, 这里把可复现的完整 URL 和真实异常打进日志
+        # 诊断输出: 只报数字等于没报。这里拆出 URL 结构(scheme/host/path/query)打印,
+        # 这些都不是 secret 的完整值, 不会被 GitHub 日志脱敏成 ***
         log("WORKER DIAG", f"CHECK_WORKER = {WORKER_CHECK_URL}")
-        if not WORKER_CHECK_URL.startswith(("http://", "https://")):
+        p = urlparse(WORKER_CHECK_URL)
+        log("WORKER DIAG", f"URL 结构: scheme={p.scheme or '(空)'} host={p.netloc or '(空)'} path={p.path or '(空)'} query={p.query or '(空)'}")
+        if not p.scheme:
             log("WORKER DIAG", "[致命] 缺少 http(s):// 前缀 -> requests 抛 MissingSchema, 所有请求瞬间失败")
-        if "?sstp=" not in WORKER_CHECK_URL:
-            log("WORKER DIAG", "[致命] 缺少 '?sstp=' 查询段 -> Worker 收不到节点参数。正确形如: https://xxx.workers.dev/check?sstp=vpn:vpn@")
-        if elapsed < 3 and len(worker_errors) == len(uniq):
-            log("WORKER DIAG", f"[提示] {len(uniq)} 个请求仅耗时 {elapsed:.1f}s 全部失败 -> 属连接层错误(URL错/DNS错/域名不存在), 不是节点质量问题")
+        if p.path.rstrip("/") != "/check":
+            log("WORKER DIAG", f"[致命] path='{p.path}' 不是 '/check' -> Worker 不匹配检测路由, 一律返回 404。"
+                               f"正确形如: https://xxx.workers.dev/check?sstp=vpn:vpn@")
+        if "sstp=" not in p.query:
+            log("WORKER DIAG", "[致命] query 里没有 sstp= -> Worker 拿不到节点地址。末尾必须留 '?sstp=vpn:vpn@'")
+        if len(worker_errors) == len(uniq):
+            log("WORKER DIAG", f"[提示] {len(uniq)} 个请求全部失败且仅耗时 {elapsed:.1f}s -> 属配置层错误(URL/路径/权限), 不是节点质量问题")
+        err_kinds = {}
+        for r in worker_errors:
+            k = str(r.get("error")).split(":")[0]
+            err_kinds[k] = err_kinds.get(k, 0) + 1
+        log("WORKER DIAG", f"错误分布: {err_kinds}")
+        if any(str(r.get("error")).startswith("HTTP 404") for r in worker_errors):
+            log("WORKER DIAG", "[404 专项] 域名能连通(TLS 握手成功)但路径不存在: 确认该 Worker 部署的是 cm-Workers-CheckSocks5, "
+                               "而不是 edgetunnel 等其他 worker; 并确认 path 是 /check")
         for i, r in enumerate(worker_errors[:3], 1):
             target = f"{r.get('host')}:{r.get('port')}"
             log("WORKER DIAG", f"样本{i} 错误 = {r.get('error')}")
