@@ -501,7 +501,24 @@ def main():
     log("CLOUDFLARE WORKER", f"检测失败: {len(failed)}" + (f" (其中 Worker 异常 {len(worker_errors)})" if worker_errors else ""))
     log("CLOUDFLARE WORKER", f"耗时: {elapsed:.1f}s")
 
+    if worker_errors:
+        # 诊断输出: 只报数字等于没报, 这里把可复现的完整 URL 和真实异常打进日志
+        log("WORKER DIAG", f"CHECK_WORKER = {WORKER_CHECK_URL}")
+        if not WORKER_CHECK_URL.startswith(("http://", "https://")):
+            log("WORKER DIAG", "[致命] 缺少 http(s):// 前缀 -> requests 抛 MissingSchema, 所有请求瞬间失败")
+        if "?sstp=" not in WORKER_CHECK_URL:
+            log("WORKER DIAG", "[致命] 缺少 '?sstp=' 查询段 -> Worker 收不到节点参数。正确形如: https://xxx.workers.dev/check?sstp=vpn:vpn@")
+        if elapsed < 3 and len(worker_errors) == len(uniq):
+            log("WORKER DIAG", f"[提示] {len(uniq)} 个请求仅耗时 {elapsed:.1f}s 全部失败 -> 属连接层错误(URL错/DNS错/域名不存在), 不是节点质量问题")
+        for i, r in enumerate(worker_errors[:3], 1):
+            target = f"{r.get('host')}:{r.get('port')}"
+            log("WORKER DIAG", f"样本{i} 错误 = {r.get('error')}")
+            log("WORKER DIAG", f"样本{i} 完整URL = {WORKER_CHECK_URL + quote(target, safe='')}")
+
     if uniq and not success and len(worker_errors) == len(uniq):
+        log("FATAL", "排查顺序: 1) 浏览器直接打开上面『完整URL』看是否返回 JSON; "
+                    "2) 确认 secret DOMAIN 必须是完整地址 https://xxx.workers.dev/check?sstp=vpn:vpn@ , 只填域名必挂; "
+                    "3) 确认检测 Worker 已部署且自身不报错")
         die("Worker 全部请求异常, 检测服务不可用 — 本次运行判定失败 (不生成空结果)")
 
     data = build_outputs(results, raw_count, sstp_count, source)
